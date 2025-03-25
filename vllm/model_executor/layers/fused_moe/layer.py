@@ -852,11 +852,15 @@ class FusedMoE(torch.nn.Module):
         if self.dp_size > 1:
             cu_tokens_across_dp_cpu = get_forward_context(
             ).dp_metadata.cu_tokens_across_dp_cpu
+            assert router_logits is not None
 
             hidden_states = self.naive_multicast(hidden_states,
                                                  cu_tokens_across_dp_cpu)
-            router_logits = self.naive_multicast(router_logits,
-                                                 cu_tokens_across_dp_cpu)
+            if router_logits is not None:
+                # router_logits is None when we use fused router
+                # and select experts kernel
+                router_logits = self.naive_multicast(router_logits,
+                                                     cu_tokens_across_dp_cpu)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(

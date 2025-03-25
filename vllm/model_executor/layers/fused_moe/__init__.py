@@ -38,12 +38,13 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.cutlass_moe import (
         cutlass_moe_fp8)
     from vllm.model_executor.layers.fused_moe.fused_moe import (
-        fused_experts, fused_moe, fused_topk, get_config_file_name,
-        grouped_topk)
+        fused_experts, fused_moe, fused_routing, fused_topk,
+        get_config_file_name, grouped_topk)
 
     __all__ += [
         "fused_moe",
         "fused_topk",
+        "fused_routing",
         "fused_experts",
         "get_config_file_name",
         "grouped_topk",

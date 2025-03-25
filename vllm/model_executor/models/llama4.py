@@ -16,7 +16,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type
+from functools import partial
 
 import torch
 from torch import nn
@@ -27,7 +28,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE, fused_routing
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
@@ -45,14 +46,22 @@ class Llama4MoE(nn.Module):
 
     @staticmethod
     def custom_routing_function(
+        layer: nn.Module,
         hidden_states: torch.Tensor,
         gating_output: torch.Tensor,
         topk: int,
         renormalize: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
-        # psuedo-standard is that the router scores are floats
-        router_scores = torch.sigmoid(router_scores.float())
+        b = hidden_states.size()
+        if b[0] > 1024:
+            router_indices, router_scores = fused_routing(
+                hidden_states, layer.router.weight.t(), topk)
+        else:
+            gating_output, _ = layer.router(hidden_states)
+            router_scores, router_indices = fast_topk(gating_output, topk, dim=-1)
+            # psuedo-standard is that the router scores are floats
+            router_scores = torch.sigmoid(router_scores.float())
+
         return (router_scores, router_indices.to(torch.int32))
 
     def __init__(self,
@@ -74,7 +83,8 @@ class Llama4MoE(nn.Module):
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
-            custom_routing_function=Llama4MoE.custom_routing_function,
+            custom_routing_function=partial(
+                Llama4MoE.custom_routing_function, self),
             intermediate_size=intermediate_size_moe,
             apply_router_weight_on_input=True,
             reduce_results=False,
@@ -93,11 +103,12 @@ class Llama4MoE(nn.Module):
         )
 
     def forward(self, hidden_states):
-        router_logits, _ = self.router(hidden_states)
         shared_out = self.shared_expert(hidden_states)
+
         routed_out = self.experts(
             hidden_states=hidden_states,
-            router_logits=router_logits,
+            # router logits are created in fused router
+            router_logits=None,
         )
         experts_out = routed_out + shared_out
 
